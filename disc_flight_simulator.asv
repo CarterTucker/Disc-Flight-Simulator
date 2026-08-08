@@ -1,0 +1,259 @@
+clear; clc;
+
+% IN THE FUTURE:
+% Run a python script to run Fluent for nA angles of attack, nV velocities,
+% nOmega spin rates, and dump the aerodynamic coefficients into a CSV. Then
+% make a script to interpolate to include all variables.
+
+% ---------------- Disc physical parameters ----------------
+% Replace with values for your disc (from the 3D geometry model / trimesh,
+% as in the paper). These are placeholder order-of-magnitude values.
+disc.m   = 0.175;          % mass, kg
+disc.D   = 0.211;          % diameter, m
+disc.S   = pi*(disc.D/2)^2; % planform area, m^2
+disc.Ixy = 0.00125;        % moment of inertia about in-plane axis, kg m^2
+disc.Iz  = 0.00235;        % moment of inertia about spin axis, kg m^2
+
+
+
+%% ---------------- Aerodynamic coefficient lookup ----------------
+% CFD-derived coefficients as a function of angle of attack alpha (deg).
+% Replace this table with your own CFD/wind-tunnel results (Fig. 5 style).
+% Columns: alpha[deg]  CL  CD  CM
+aero.table = [ ...
+    -10  -0.19   0.08  -0.075
+     -5  -0.02   0.05  -0.045
+      0   0.10   0.04  -0.010
+      5   0.28   0.06   0.020
+     10   0.50   0.10   0.055
+     15   0.75   0.17   0.075
+     20   0.95   0.28   0.085 ];
+
+aero.alpha_deg = aero.table(:,1);
+aero.CL_tab    = aero.table(:,2);
+aero.CD_tab    = aero.table(:,3);
+aero.CM_tab    = aero.table(:,4);
+
+%% ---------------- Environment ----------------
+env.g      = 9.81;              % m/s^2
+env.rho    = 1.225;             % air density, kg/m^3
+env.wind_v = [0 0 0];           % wind velocity in earth axes, m/s
+
+%% ---------------- Initial throw conditions ----------------
+% Position (earth axes), released at origin, 1 m release height
+x0 = [0; 0; 1.0];
+
+% Speed and Euler angles at release
+speed0     = 24.5;              % m/s
+roll0_deg  = 15;                % deg
+pitch0_deg = 10;                % deg (nose angle in vertical plane)
+yaw0_deg   = -5;                % deg (initial launch direction offset)
+
+phi0   = deg2rad(roll0_deg);
+theta0 = deg2rad(pitch0_deg);
+psi0   = deg2rad(yaw0_deg);
+euler0 = [phi0; theta0; psi0];      % [roll; pitch; yaw]
+
+% Initial velocity: define speed along the disc's nose direction at
+% release, then rotate into earth axes via T12' (T12 converts EARTH ->
+% DISC as defined in the paper's convention, so its transpose T21 = T12'
+% goes from disc-frame heading to earth axes).
+u_disc0 = [speed0; 0; 0];           % all initial speed along disc x-axis
+T12_0   = T12_matrix(euler0);
+u_earth0 = T12_0' * u_disc0;        % disc axes -> earth axes
+
+spin0 = 138.0;                      % rad/s, from CFD/paper example throws
+
+%% ---------------- Simulation settings ----------------
+tspan = [0 6];                      % seconds, integrate until well after landing
+opts  = odeset('Events', @(t,y) ground_event(t,y), ...
+                'RelTol', 1e-6, 'AbsTol', 1e-8, 'MaxStep', 0.01);
+
+% State vector y = [x; y; z; u; v; w; phi; theta; psi]
+% (u,v,w) = velocity components in EARTH axes
+y0 = [x0; u_earth0; euler0];
+
+%% ---------------- Integrate (RK45, i.e. ode45) ----------------
+odefun = @(t, y) disc_eom(t, y, disc, aero, env, spin0);
+[t, y, te, ye, ie] = ode45(odefun, tspan, y0, opts); %#ok<ASGLU>
+
+%% ---------------- Results ----------------
+pos = y(:,1:3);
+fprintf('Flight time: %.2f s\n', t(end));
+fprintf('Range (downrange, y): %.1f m\n', pos(end,2));
+fprintf('Drift (lateral, x):   %.1f m\n', pos(end,1));
+
+figure('Name','Disc golf trajectory (2D views)');
+subplot(2,1,1);
+plot(pos(:,2), pos(:,1), 'LineWidth', 1.5);
+xlabel('Downrange distance, y (m)'); ylabel('Drift, x (m)');
+title('Trajectory viewed from above'); axis equal; grid on;
+
+subplot(2,1,2);
+plot(pos(:,2), pos(:,3), 'LineWidth', 1.5);
+xlabel('Downrange distance, y (m)'); ylabel('Height, z (m)');
+title('Trajectory side view'); grid on; ylim([0 max(pos(:,3))*1.2]);
+
+%% ---------------- 3D trajectory plot ----------------
+figure('Name','Disc golf trajectory (3D)');
+plot3(pos(:,1), pos(:,2), pos(:,3), 'LineWidth', 2, 'Color', [0.85 0.33 0.10]);
+hold on;
+
+% Mark release and landing points
+plot3(pos(1,1), pos(1,2), pos(1,3), 'o', 'MarkerSize', 7, ...
+      'MarkerFaceColor', [0.10 0.60 0.35], 'MarkerEdgeColor', 'k');
+plot3(pos(end,1), pos(end,2), pos(end,3), 'o', 'MarkerSize', 7, ...
+      'MarkerFaceColor', [0.55 0.10 0.10], 'MarkerEdgeColor', 'k');
+
+% Faint ground-projection curve (x-y path traced at z = 0) for depth cues
+plot3(pos(:,1), pos(:,2), zeros(size(pos,1),1), '--', ...
+      'LineWidth', 0.75, 'Color', [0.6 0.6 0.6]);
+
+xlabel('Drift, x (m)');
+ylabel('Downrange distance, y (m)');
+zlabel('Height, z (m)');
+title('3D flight trajectory');
+legend({'Flight path','Release','Landing','Ground projection'}, ...
+       'Location', 'best');
+grid on; axis equal; view(-35, 20);
+hold off;
+
+
+%% ================= LOCAL FUNCTIONS =================
+% MATLAB scripts support local functions below all script code, as long
+% as this file is run as a script (not called as a function itself).
+
+function T = T12_matrix(euler)
+% T12_MATRIX  Earth axes -> disc axes rotation matrix (paper Eq. A1)
+%   euler = [phi; theta; psi] = [roll; pitch; yaw], radians
+%
+%   Note the paper's axis convention has z pointing UP (stated explicitly
+%   in Appendix A), which differs from the standard aerospace NED
+%   convention, so don't substitute a textbook Euler matrix without
+%   checking sign conventions.
+
+phi   = euler(1);
+theta = euler(2);
+psi   = euler(3);
+
+T = [ cos(theta)*cos(psi), ...
+      sin(phi)*sin(theta)*cos(psi) - cos(phi)*sin(psi), ...
+      cos(phi)*sin(theta)*cos(psi) + sin(phi)*sin(psi); ...
+      ...
+      cos(theta)*sin(psi), ...
+      sin(phi)*sin(theta)*sin(psi) + cos(phi)*cos(psi), ...
+      cos(phi)*sin(theta)*sin(psi) - sin(phi)*cos(psi); ...
+      ...
+      -sin(theta), ...
+      sin(phi)*cos(theta), ...
+      cos(phi)*cos(theta) ];
+end
+
+
+function T = T23_matrix(beta)
+% T23_MATRIX  Disc axes -> zero sideslip axes rotation (paper Eq. A2)
+%   beta = sideslip angle, radians
+
+T = [ cos(beta), -sin(beta), 0; ...
+      sin(beta),  cos(beta), 0; ...
+      0,          0,         1 ];
+end
+
+
+function T = T34_matrix(alpha)
+% T34_MATRIX  Zero sideslip axes -> wind axes rotation (paper Eq. A3)
+%   alpha = angle of attack, radians
+
+T = [ cos(alpha), 0, -sin(alpha); ...
+      0,          1,  0; ...
+      sin(alpha), 0,  cos(alpha) ];
+end
+
+
+function dydt = disc_eom(~, y, disc, aero, env, spin)
+% DISC_EOM  Right-hand side of the disc trajectory ODE.
+%   State y = [x; y; z; u; v; w; phi; theta; psi]
+%     (x,y,z)     position, earth axes
+%     (u,v,w)     velocity, earth axes
+%     (phi,theta,psi)  roll, pitch, yaw, earth-referenced attitude
+%
+%   Follows Section 2.3 of Giljarhus et al. (2022): velocity is carried
+%   through Earth -> Disc -> Zero-sideslip -> Wind axes, aerodynamic
+%   coefficients are looked up at the resulting angle of attack, forces
+%   are computed in wind axes then transformed back to earth axes, and
+%   attitude is updated using constant-spin gyroscopic precession only
+%   (Eq. 11), matching the paper's stated simplification (no wobble).
+
+euler = y(7:9);              % [phi; theta; psi]
+u1    = y(4:6);              % velocity in earth axes
+
+% Include wind: subtract wind velocity from ground-relative velocity to
+% get velocity relative to the air (paper Section 2.3, "wind velocity can
+% also be included by subtracting from the initial velocity").
+u1_rel = u1 - env.wind_v(:);
+
+%% Step 1->2: Earth axes to disc axes (Eq. 4)
+T12 = T12_matrix(euler);
+u2  = T12 * u1_rel;
+
+%% Step 2: sideslip angle (Eq. 5), then rotate to zero sideslip axes (Eq. 6)
+beta = -atan2(u2(2), u2(1));
+T23  = T23_matrix(beta);
+u3   = T23 * u2;
+
+%% Step 3: angle of attack (Eq. 7), then rotate to wind axes (Eq. 8)
+alpha = -atan2(u3(3), u3(1));
+T34   = T34_matrix(alpha);
+u4    = T34 * u3;   %#ok<NASGU>  % velocity in wind axes (not needed further)
+
+alpha_deg = rad2deg(alpha);
+
+%% Look up aerodynamic coefficients at this angle of attack
+CL = interp1(aero.alpha_deg, aero.CL_tab, alpha_deg, 'linear', 'extrap');
+CD = interp1(aero.alpha_deg, aero.CD_tab, alpha_deg, 'linear', 'extrap');
+CM = interp1(aero.alpha_deg, aero.CM_tab, alpha_deg, 'linear', 'extrap');
+
+%% Forces in wind axes (Eqs. 1-2, 9)
+Vrel = norm(u1_rel);
+q    = 0.5 * env.rho * Vrel^2;
+FD   = q * CD * disc.S;
+FL   = q * CL * disc.S;
+M    = q * CM * disc.D * disc.S;    % pitching moment, Eq. 3
+
+F4 = [-FD; 0; FL];                  % force vector in wind axes, Eq. 9
+
+%% Gravity, transformed into wind axes (Eq. 10)
+g1 = [0; 0; -disc.m * env.g];
+T14full = T34 * T23 * T12;          % Eq. A4: ground -> wind, full chain
+g4 = T14full * g1;
+
+F4_total = F4 + g4;
+
+%% Transform force back to earth axes (Eq. 12): T41 = T14'
+T41 = T14full';
+F1  = T41 * F4_total;
+accel = F1 / disc.m;
+
+%% Attitude rate: constant spin, roll from gyroscopic precession only (Eq. 11)
+theta3_dot = [ -M / (spin * (disc.Ixy - disc.Iz)); 0; 0 ];  % in zero-sideslip axes
+
+% Transform back to earth axes (Eq. 13): T31 = T23*T12, so T13 = T31' etc.
+T31 = T23 * T12;
+euler_dot = T31' * theta3_dot;
+
+%% Assemble derivative
+dydt = zeros(9,1);
+dydt(1:3) = u1;              % position rate = velocity (earth axes)
+dydt(4:6) = accel;           % velocity rate = acceleration (earth axes)
+dydt(7:9) = euler_dot;       % attitude rate
+end
+
+
+function [value, isterminal, direction] = ground_event(~, y)
+% GROUND_EVENT  Stops ode45 integration when the disc's z position
+% crosses zero (lands), approaching from above.
+
+value      = y(3);   % z position; triggers when this hits 0
+isterminal = 1;       % stop the integration
+direction  = -1;      % only trigger when z is decreasing
+end
