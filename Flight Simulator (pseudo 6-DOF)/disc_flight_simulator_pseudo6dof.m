@@ -19,6 +19,7 @@ disc.S   = pi*(disc.D/2)^2; % planform area, m^2
 disc.Ixy = 0.00125;        % moment of inertia about in-plane axis, kg m^2
 disc.Iz  = 0.00235;        % moment of inertia about spin axis, kg m^2
 
+% Aerodynamic Characteristics
 aero.data = [ ...
    -10.0   8.0  0.1384662  -0.2469406  -0.0602598
    -10.0  14.0  0.1323100  -0.2337933  -0.0566442
@@ -110,8 +111,8 @@ env.wind_v = [0 0 0];           % wind velocity in earth axes, m/s
 
 % throw conditions
 x0 = [0; 0; 1.0];               % release 1m above ground
-v0     = 20;                  % m/s
-roll0_deg  = 0;                % deg
+v0     = 29;                  % m/s
+roll0_deg  = -5;                % deg
 pitch0_deg = 3;                % deg (nose angle in vertical plane)
 yaw0_deg   = 0;                % deg (initial launch direction offset)
 
@@ -122,11 +123,11 @@ euler0 = [phi0; theta0; psi0];      % [roll; pitch; yaw]
 
 throw_force_angle = deg2rad(5);
 
-u_disc0 = [v0*cos(throw_force_angle); 0; v0*sin(throw_force_angle)];           % all initial speed along disc x-axis
+u_earth0 = [v0*cos(throw_force_angle); 0; v0*sin(throw_force_angle)];           % all initial speed along disc x-axis
 T12_0   = T12_matrix(euler0);
-u_earth0 = T12_0' * u_disc0;        % disc axes -> earth axes
+% u_earth0 = T12_0' * u_disc0;        % disc axes -> earth axes
 
-spin0 = -105.0;                      % rad/s, from CFD/paper example throws
+spin0 = -157.0;                      % rad/s, from CFD/paper example throws
 
 %% ---------------- Simulation settings ----------------
 tspan = [0 6];                      % seconds, integrate until well after landing
@@ -299,7 +300,7 @@ T41 = T14full';
 F1  = T41 * F4_total;
 accel = F1 / disc.m;
 
-%% Attitude rate: constant spin, roll from gyroscopic precession only (Eq. 11)
+%% Attitude Rate
 theta3_dot = [ -M / (spin * (disc.Ixy - disc.Iz)); 0; 0 ];  % in zero-sideslip axes
 
 % Transform back to earth axes (Eq. 13): T31 = T23*T12, so T13 = T31' etc.
