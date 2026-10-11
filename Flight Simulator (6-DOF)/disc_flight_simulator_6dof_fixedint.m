@@ -105,11 +105,11 @@ env.wind_v = [0 0 0];           % wind velocity in earth axes, m/s
 x0 = [0; 0; 1.0];               % release 1m above ground
 v0 = 29;                        % m/s
 
-roll0_deg  = -5;                 % deg
+roll0_deg  = -10;                 % deg
 pitch0_deg = 3;                 % deg (nose angle in vertical plane)
 yaw0_deg = 0;                   % deg (initial launch direction offset)
 
-r0 = 1500;                    % rpm (spin rate; negative is CW)
+r0 = 1500.0;                    % rpm (spin rate; negative is CW)
 p0 = 0;
 q0 = 0;
 
@@ -125,43 +125,30 @@ throw_force_angle = deg2rad(5);
 % initial spin vector
 euler0 = [phi0; theta0; psi0];
 
-euler_test = [0; 0; pi/2];
-q_test = euler2quat(euler_test);
-T_from_quat = T12_from_quat(q_test);
-T_from_euler = T12_matrix(euler_test);
-disp(T_from_quat - T_from_euler);
-
 % initial velocity vector
 u_earth0 = [v0*cos(throw_force_angle); 0; v0*sin(throw_force_angle)];           % all initial speed along disc x-axis
 T12_0   = T12_matrix(euler0);
+% u_earth0 = T12_0' * u_disc0;
 
 % initial body-axis angular rates
 angvel0 = [p0; q0; r0];
 
 
 %% Simulation Settings
-tspan = [0 3];
+tspan = [0 8];
 opts = odeset('Events', @(t,y) ground_event(t,y), 'RelTol', ...
     1e-4, 'AbsTol', 1e-6, 'MaxStep', 0.005, 'OutputFcn', @(t,y,flag) progress_print(t,y,flag));
 
-% initial states (quaternion)
-q0 = euler2quat(euler0);
-y0 = [x0; u_earth0; q0; angvel0];
+% Define the initial state vector
+y0 = [x0; u_earth0; euler0; angvel0];
+
 
 %% Simulation Solver (fixed-step RK4)
 dt = 0.001;                      % seconds per step
 N  = ceil(diff(tspan)/dt) + 1;
 
-y_hist = zeros(13, N);
+y_hist = zeros(12, N);
 t_hist = zeros(1, N);
-
-disc_velo = zeros(3, N);
-disc_accel = zeros(3, N);
-disc_angvelo = zeros(4, N);
-disc_angaccel = zeros(3, N);
-disc_p = zeros(1, N);
-disc_q = zeros(1, N);
-disc_r = zeros(1, N);
 
 y_hist(:,1) = y0;
 t_hist(1)   = tspan(1);
@@ -176,46 +163,34 @@ for i = 1:N-1
     k4 = disc_eom(ti+dt,     yi+dt*k3,    disc, aero, env);
 
     y_next = yi + dt/6*(k1 + 2*k2 + 2*k3 + k4);
-    y_next(7:10) = y_next(7:10) / norm(y_next(7:10));   % renormalize quaternion
 
     y_hist(:,i+1) = y_next;
     t_hist(i+1)   = ti + dt;
-
-    [~, diag] = disc_eom(ti + dt, y_next, disc, aero, env);
-    disc_velo(:,i)     = diag.velo;
-    disc_accel(:,i)    = diag.accel;
-    disc_angvelo(:,i)  = diag.angvelo;
-    disc_angaccel(:,i) = diag.angaccel;
-    disc_p(i) = diag.p;
-    disc_q(i) = diag.q;
-    disc_r(i) = diag.r;
 
     if y_next(3) <= 0
         y_hist = y_hist(:,1:i+1);
         t_hist = t_hist(1:i+1);
         break
     end
-
 end
 
 t = t_hist';
 y = y_hist';        % transpose so downstream plotting code (y(:,1:3) etc.) still works unchanged
 
+
 %% The actual physics...
-function [dydt, diag] = disc_eom(~, y, disc, aero, env)
+function dydt = disc_eom(~, y, disc, aero, env)
     
-    %% Initial States (quaternion)
-    u1 = y(4:6);
-
-    q = y(7:10);
-    q = q / norm(q);
-
-    angvel = y(11:13);
+    %% Initial States
+    u1    = y(4:6);              % velocity in earth axes
+    euler = y(7:9);              % [phi; theta; psi]
+    angvel = y(10:12);           % [p; q; r];
 
     u1_rel = u1 - env.wind_v(:);
 
     %% Rotation Matrices
-    T12 = T12_from_quat(q);
+    T12 = T12_matrix(euler);        % earth axes -> disc axes
+
     u2  = T12 * u1_rel;
 
     beta = -atan2(u2(2), u2(1));    % zero sideslip angle
@@ -241,9 +216,6 @@ function [dydt, diag] = disc_eom(~, y, disc, aero, env)
     CM = interp2(aero.U_grid, aero.alpha_deg, aero.CM_grid, ...
                  Vlookup, Alookup, 'linear');
 
-    fprintf('alpha = %.3f deg, V = %.2f, CM = %.4f, q = %.3f\n', ...
-        alpha_deg, Vrel_for_lookup, CM, angvel(2));
-
     %% Forces in Wind Axes
     Vrel = norm(u1_rel);
     q_dyn = 0.5 * env.rho * Vrel^2;
@@ -259,51 +231,30 @@ function [dydt, diag] = disc_eom(~, y, disc, aero, env)
     F4_total = F4 + g4;                 % add the lift, drag, and gravity forces
 
     %% Roll Rate Equations
-    Clp = -0.001;
-    CMq = -0.01;
-    
-    Mx = q_dyn * disc.S * disc.D * Clp * angvel(1) * disc.D / (2*Vrel);
-    My = q_dyn * disc.S * disc.D * ...
-         (CM + CMq * angvel(2) * disc.D / (2*Vrel));
+    Mx = 0;
+    My = q_dyn * CM * disc.D * disc.S;
     Mz = 0;
-    % Mx = 0;
-    % My = 0.01;
-    % Mz = 0;
     M_disc = T23' * T34' * [Mx; My; Mz];  % moments in wind axes to disc axes
-    % M_disc = [Mx; My; Mz];  % moments in wind axes to disc axes
 
-    angvel_dot = [(M_disc(1) - angvel(2)*angvel(3)*(disc.Iz - disc.Ixy))/disc.Ixy; ...
-                  (M_disc(2) + angvel(3)*angvel(1)*(disc.Iz - disc.Ixy))/disc.Ixy; ...
-                  M_disc(3)/disc.Iz];
-
-    % fprintf('My = %.6f, Mdisc = [%.6f %.6f %.6f]\n', ...
-    % My, M_disc(1), M_disc(2), M_disc(3));
-    fprintf('alpha = %.3f, CL = %.4f, CD = %.4f, CM = %.4f, My = %.5f, p = %.3f, q = %.3f, r = %.3f\n', ...
-    alpha_deg, CL, CD, CM, My, angvel(1), angvel(2), angvel(3));
+    angvel_dot = 1/disc.Ixy * [M_disc(1) - angvel(2)*angvel(3)*(disc.Iz - disc.Ixy); ...
+                               M_disc(2) + angvel(3)*angvel(1)*(disc.Iz - disc.Ixy); ...
+                               M_disc(3)*disc.Ixy/disc.Iz];
    
     %% Attitude Rate
-    omega_pure = [0; angvel];
-    % q_dot = -0.5 * quat_multiply(omega_pure, q);
-    q_dot = 0.5 * quat_multiply(q, omega_pure);
+    euler_dot = [angvel(1) + angvel(2)*sin(euler(1))*tan(euler(2)) + angvel(3)*cos(euler(1))*tan(euler(2)); ...
+                 angvel(2)*cos(euler(1)) - angvel(3)*sin(euler(1)); ...
+                 angvel(2)*sin(euler(1))/cos(euler(2)) + angvel(3)*cos(euler(1))/cos(euler(2))];
 
     %% Convert Wind Axes Forces and Moments to Earth Axes
     F1  = T41 * F4_total;               % lift, drag, and gravity
     accel = F1 / disc.m;
 
-    %% Construct the derivative (quaternion)
-    dydt = zeros(13,1);
+    %% Construct the derivative
+    dydt = zeros(12,1);
     dydt(1:3) = u1;              % velocity
     dydt(4:6) = accel;           % acceleration
-    dydt(7:10) = q_dot;       % angular velocity
-    dydt(11:13) = angvel_dot;    % angular acceleration
-
-    diag.velo = u1;
-    diag.accel = accel;
-    diag.angvelo = q_dot;
-    diag.angaccel = angvel_dot;
-    diag.p = angvel(1);
-    diag.q = angvel(2);
-    diag.r = angvel(3);
+    dydt(7:9) = euler_dot;       % angular velocity
+    dydt(10:12) = angvel_dot;    % angular acceleration
 
 end
 
@@ -339,27 +290,6 @@ axis equal;
 view(-115, 45);
 hold off;
 
-
-%% Print Debugging Data
-debug = [disc_velo; disc_accel; disc_angvelo; disc_angaccel];
-[~, l] = size(t_hist);
-figure;
-plot(t_hist, disc_p(1:l));
-hold on;
-plot(t_hist, disc_q(1:l));
-plot(t_hist, disc_r(1:l));
-legend('p','q','r');
-grid on;
-xlabel('Time (s)');
-ylabel('Angular rate (rad/s)');
-
-disc_p(1:3)
-disc_q(1:3)
-disc_r(1:3)
-
-disc_p(l-3:l-1)
-disc_q(l-3:l-1)
-disc_r(l-3:l-1)
 
 %% Rotation Matrix Functions
 function T = T12_matrix(euler)
@@ -402,54 +332,5 @@ function status = progress_print(t, y, flag)
     status = 0;
     if isempty(flag) && ~isempty(t)
         fprintf('t = %.4f, z = %.3f, |q| = %.6f\n', t(end), y(3,end), norm(y(7:10,end)));
-        fprintf('t=%.5f  q=[%.4f %.4f %.4f %.4f]\n', t(end), y(7,end), y(8,end), y(9,end), y(10,end));
     end
-end
-
-% quaternion functions
-function q = euler2quat(euler)
-    phi   = euler(1);
-    theta = euler(2);
-    psi   = euler(3);
-
-    cphi = cos(phi/2);   sphi = sin(phi/2);
-    cth  = cos(theta/2); sth  = sin(theta/2);
-    cpsi = cos(psi/2);   spsi = sin(psi/2);
-
-    q0 = cphi*cth*cpsi + sphi*sth*spsi;
-    q1 = sphi*cth*cpsi - cphi*sth*spsi;
-    q2 = cphi*sth*cpsi + sphi*cth*spsi;
-    q3 = cphi*cth*spsi - sphi*sth*cpsi;
-
-    q = [q0; q1; q2; q3];
-end
-
-function T = T12_from_quat(q)
-    q0 = q(1); q1 = q(2); q2 = q(3); q3 = q(4);
-
-    T = [ q0^2+q1^2-q2^2-q3^2,   2*(q1*q2 - q0*q3),     2*(q1*q3 + q0*q2); ...
-          2*(q1*q2 + q0*q3),     q0^2-q1^2+q2^2-q3^2,   2*(q2*q3 - q0*q1); ...
-          2*(q1*q3 - q0*q2),     2*(q2*q3 + q0*q1),     q0^2-q1^2-q2^2+q3^2 ];
-end
-
-function c = quat_multiply(a, b)
-    a0 = a(1); a1 = a(2); a2 = a(3); a3 = a(4);
-    b0 = b(1); b1 = b(2); b2 = b(3); b3 = b(4);
-
-    c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3;
-    c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2;
-    c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1;
-    c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0;
-
-    c = [c0; c1; c2; c3];
-end
-
-function euler = quat2euler(q)
-    q0 = q(1); q1 = q(2); q2 = q(3); q3 = q(4);
-
-    phi   = atan2(2*(q0*q1 + q2*q3), 1 - 2*(q1^2 + q2^2));
-    theta = asin(max(-1, min(1, 2*(q0*q2 - q3*q1))));   % clamp for numerical safety near +-90 deg
-    psi   = atan2(2*(q0*q3 + q1*q2), 1 - 2*(q2^2 + q3^2));
-
-    euler = [phi; theta; psi];
 end

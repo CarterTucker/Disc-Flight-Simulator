@@ -59,8 +59,8 @@ env.wind_v = [0 0 0];           % wind velocity in earth axes, m/s
 x0 = [0; 0; 1.7];               % release 1m above ground
 v0 = 29;                        % m/s
 
-roll0_deg  = -10;                 % deg
-pitch0_deg = 2;                 % deg (nose angle in vertical plane)
+roll0_deg  = 0;                 % deg
+pitch0_deg = 4;                 % deg (nose angle in vertical plane)
 yaw0_deg = 0;                   % deg (initial launch direction offset)
 
 r0 = 550;                 % rpm (spin rate; negative is CW)
