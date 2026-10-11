@@ -3,8 +3,6 @@
 **A MATLAB flight simulator for a disc golf disc, developed from a pseudo 6-DOF trajectory model into a full 6-DOF rigid-body model with quaternion attitude, an OpenFOAM-derived aerodynamic database, and an interactive 3D playback.**
 
 ![MATLAB](https://img.shields.io/badge/code-MATLAB-0076A8?style=flat-square)
-![Model](https://img.shields.io/badge/model-6--DOF-555555?style=flat-square)
-![Attitude](https://img.shields.io/badge/attitude-quaternion-555555?style=flat-square)
 ![Aero](https://img.shields.io/badge/aero-OpenFOAM-555555?style=flat-square)
 
 <p align="center">
